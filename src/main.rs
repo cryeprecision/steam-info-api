@@ -13,8 +13,7 @@ use futures::StreamExt;
 use parking_lot::RwLock;
 use steam_api_concurrent::api::{Friend, PlayerBan, PlayerSummary};
 use steam_api_concurrent::constants::{
-    PLAYER_BANS_IDS_PER_REQUEST, PLAYER_SUMMARIES_IDS_PER_REQUEST, PROFILE_URL_ID64_PREFIX,
-    PROFILE_URL_VANITY_PREFIX,
+    PLAYER_BANS_IDS_PER_REQUEST, PLAYER_SUMMARIES_IDS_PER_REQUEST,
 };
 use steam_api_concurrent::{SteamId, SteamIdStr};
 use thiserror::Error;
@@ -38,12 +37,8 @@ struct ResponseJsonCached {
 enum Error {
     #[error("Failed to acquire a semaphore permit")]
     SemaphoreClosed,
-    #[error("Failed to parse SteamID '{0}'")]
-    InvalidSteamId(String),
     #[error("Failed to resolve vanity URL '{0}'")]
     InvalidVanityUrl(String),
-    #[error("Invalid profile URL '{0}'")]
-    InvalidUrl(String),
     #[error("Failed to fetch friends list for {0}")]
     FriendsListRequest(SteamId),
     #[error("Failed to fetch bans for [{0}, ...]")]
@@ -63,9 +58,7 @@ impl Error {
             | Error::BansRequest(_)
             | Error::SummaryRequest(_)
             | Error::FutureClosed => HttpResponse::InternalServerError().body(body),
-            Error::InvalidSteamId(_) | Error::InvalidVanityUrl(_) | Error::InvalidUrl(_) => {
-                HttpResponse::BadRequest().body(body)
-            }
+            Error::InvalidVanityUrl(_) => HttpResponse::BadRequest().body(body),
         }
     }
 }
@@ -185,24 +178,6 @@ impl AppState {
     }
 }
 
-fn try_extract<'a>(input: &'a str, prefix: &'static str) -> Option<&'a str> {
-    let (_, suffix) = input.split_once(prefix)?;
-    Some(match suffix.split_once('/') {
-        Some((first, _)) => first,
-        None => suffix,
-    })
-}
-
-async fn extract_steam_id(state: Data<AppState>, input: &str) -> Result<SteamId, Error> {
-    if let Some(steam_id) = try_extract(input, PROFILE_URL_ID64_PREFIX) {
-        SteamId::from_str(steam_id).map_err(|_| Error::InvalidSteamId(steam_id.to_string()))
-    } else if let Some(vanity_url) = try_extract(input, PROFILE_URL_VANITY_PREFIX) {
-        state.resolve_vanity_url(vanity_url).await
-    } else {
-        Err(Error::InvalidUrl(input.to_string()))
-    }
-}
-
 #[tracing::instrument(level = "debug", skip(state))]
 async fn fetch_json_response(
     state: Data<AppState>,
@@ -273,11 +248,8 @@ async fn fetch_json_response(
     }))
 }
 
-async fn json_response(state: Data<AppState>, input: web::Path<(String,)>) -> HttpResponse {
-    let steam_id = match extract_steam_id(state.clone(), &input.0).await {
-        Ok(steam_id) => steam_id,
-        Err(err) => return err.into_response(),
-    };
+async fn json_response(state: Data<AppState>, input: web::Path<(SteamIdStr,)>) -> HttpResponse {
+    let steam_id = input.0.steam_id();
 
     if let Some(cached) = state.cache.get(steam_id) {
         return HttpResponse::Ok().json(cached.as_ref());
@@ -293,6 +265,14 @@ async fn json_response(state: Data<AppState>, input: web::Path<(String,)>) -> Ht
     HttpResponse::Ok().json(response_json.as_ref())
 }
 
+async fn resolve_vanity_url(state: Data<AppState>, input: web::Path<(String,)>) -> HttpResponse {
+    let vanity_url = input.0.as_str();
+    let result = match state.resolve_vanity_url(vanity_url).await {
+        Ok(result) => result,
+        Err(err) => return err.into_response(),
+    };
+    HttpResponse::Ok().json(SteamIdStr::from(result))
+}
 
 #[tracing::instrument(level = "debug", skip(validator))]
 fn load_env_var<T, F>(key: &str, validator: F) -> anyhow::Result<T>
@@ -316,8 +296,11 @@ where
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _ = dotenv::dotenv()?;
     env_logger::init();
+
+    if dotenv::dotenv().is_err() {
+        log::warn!("No `.env` file found")
+    }
 
     let steam_api_key = load_env_var("STEAM_INFO_API_STEAM_API_KEY", |_: &String| None)?;
 
@@ -363,7 +346,8 @@ async fn main() -> anyhow::Result<()> {
     HttpServer::new(move || {
         App::new()
             .app_data(app_state.clone())
-            .route("/json/{url:.*}", web::get().to(json_response))
+            .route("/json/{steam_id}", web::get().to(json_response))
+            .route("/vanity/{vanity}", web::get().to(resolve_vanity_url))
     })
     .bind(("0.0.0.0", port))?
     .run()

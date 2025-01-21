@@ -279,13 +279,13 @@ fn load_env_var<T, F>(key: &str, validator: F) -> anyhow::Result<T>
 where
     T: FromStr + Display,
     T::Err: Send + Sync + std::error::Error + 'static,
-    F: FnOnce(&T) -> Option<anyhow::Error>,
+    F: FnOnce(&T) -> anyhow::Result<()>,
 {
     let val =
         dotenv::var(key).with_context(|| format!("couldn't load environment variable {}", key))?;
     let val = T::from_str(val.as_str())
         .with_context(|| format!("couldn't parse environmant variable {} (={})", key, val))?;
-    if let Some(err) = validator(&val) {
+    if let Err(err) = validator(&val) {
         return Err(err.context(format!(
             "couldn't validate environment variable {} (={})",
             key, val
@@ -302,21 +302,23 @@ async fn main() -> anyhow::Result<()> {
         log::warn!("No `.env` file found")
     }
 
-    let steam_api_key = load_env_var("STEAM_INFO_API_STEAM_API_KEY", |_: &String| None)?;
+    let steam_api_key = load_env_var("STEAM_INFO_API_STEAM_API_KEY", |_: &String| Ok(()))?;
 
     let cache_duration_ms = load_env_var("STEAM_INFO_API_CACHE_DURATION_MS", |&val: &i64| {
-        (val < 0).then_some(anyhow::Error::msg("must be greater or equal to zero"))
+        anyhow::ensure!(val >= 0, "must be greater or equal to zero");
+        Ok(())
     })?;
 
     let concurrent_requests =
         load_env_var("STEAM_INFO_API_CONCURRENT_REQUESTS", |&val: &usize| {
-            (val > 100)
-                .then_some(anyhow::Error::msg("calm down there partner"))
-                .or_else(|| (val == 0).then_some(anyhow::Error::msg("must not be equal to zero")))
+            anyhow::ensure!(val != 0, "must not be equal to zero");
+            anyhow::ensure!(val <= 100, "calm down there partner",);
+            Ok(())
         })?;
 
     let port = load_env_var("STEAM_INFO_API_PORT", |&val: &u16| {
-        (val == 0).then_some(anyhow::Error::msg("must not be equal to zero"))
+        anyhow::ensure!(val != 0, "must not be equal to zero");
+        Ok(())
     })?;
 
     if cache_duration_ms > 0 {

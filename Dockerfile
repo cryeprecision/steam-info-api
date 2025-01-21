@@ -1,5 +1,5 @@
 # Build the project
-FROM rustlang/rust:nightly as builder
+FROM rustlang/rust:nightly AS builder
 
 # Create a dummy project to cache dependencies
 RUN cargo new steam-info-api --bin

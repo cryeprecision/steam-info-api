@@ -1,3 +1,6 @@
 /target
 .env
 docker-compose.yml
+
+build-and-upload.sh
+*.zst
